@@ -55,9 +55,17 @@ function runBuildAndPublish(commitMessage) {
 
         // ── 6. Publish ────────────────────────────────────────────────────
         console.log(`🚀 Publishing @killriam/mamo-sim@${newVersion}...`);
-        execSync("dotenv -- npm publish --access public", {
+        // Load token from .env manually — dotenv ${NPM_TOKEN} interpolation
+        // in .npmrc is unreliable across npm versions; NODE_AUTH_TOKEN is canonical.
+        const envContent = fs.readFileSync(path.join(__dirname, ".env"), "utf8");
+        const tokenMatch = envContent.match(/NPM_TOKEN=(.+)/);
+        if (!tokenMatch) throw new Error("NPM_TOKEN not found in .env");
+        const npmToken = tokenMatch[1].trim();
+
+        execSync("npm publish --access public --registry https://npm.pkg.github.com/", {
             stdio: "inherit",
             cwd: path.join(__dirname, "pkg"),
+            env: { ...process.env, NODE_AUTH_TOKEN: npmToken },
         });
 
         console.log(`✅ Published @killriam/mamo-sim@${newVersion} to GitHub Package Registry!`);
