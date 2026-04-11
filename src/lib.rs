@@ -61,6 +61,18 @@ pub fn run_batch(
     json
 }
 
+/// Native (non-WASM) entry point — identical logic, no wasm_bindgen attribute.
+/// Used by mamo-connector to run simulations locally without WASM overhead.
+pub fn run_batch_native(
+    encoded: &[u8],
+    mech_keys: Vec<String>,
+    games: u32,
+    max_turns: u8,
+    seed: u32,
+) -> String {
+    run_batch(encoded, mech_keys, games, max_turns, seed)
+}
+
 // ── Unit tests (run with `cargo test`, native target) ──────────────────────
 
 #[cfg(test)]
