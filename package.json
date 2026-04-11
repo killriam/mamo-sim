@@ -1,0 +1,11 @@
+{
+  "name": "mamo-sim-build",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build-publish": "node build-and-publish.js"
+  },
+  "devDependencies": {
+    "dotenv-cli": "8.0.0"
+  }
+}
