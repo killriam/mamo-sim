@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+
+# wasm-pack output (generated, not committed)
+/pkg/
+
+# Cargo lock — keep for binaries, optional for libraries
+# Cargo.lock
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Profiling / benchmarks output
+flamegraph.svg
+perf.data
+
+# Test coverage
+tarpaulin-report.html
+lcov.info
+
+# Logs
+*.log
