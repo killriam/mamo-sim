@@ -66,7 +66,7 @@ function runBuildAndPublish(commitMessage) {
         execSync("npm publish --access public --registry https://npm.pkg.github.com/", {
             stdio: "inherit",
             cwd: path.join(__dirname, "pkg"),
-            env: { ...process.env, NODE_AUTH_TOKEN: npmToken },
+            env: { ...process.env, NPM_TOKEN: npmToken, NODE_AUTH_TOKEN: npmToken },
         });
 
         console.log(`✅ Published @killriam/mamo-sim@${newVersion} to GitHub Package Registry!`);
