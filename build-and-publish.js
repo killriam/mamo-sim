@@ -18,6 +18,7 @@ function runBuildAndPublish(commitMessage) {
         // ── 3. Patch pkg/package.json with GitHub registry ───────────────
         const pkgPath = path.join(__dirname, "pkg", "package.json");
         const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+        delete pkg.private;
         pkg.publishConfig = { registry: "https://npm.pkg.github.com/" };
         fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
         console.log("✏️  Patched pkg/package.json with GitHub registry");
