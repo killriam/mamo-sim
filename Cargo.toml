@@ -1,6 +1,6 @@
 [package]
 name = "mamo-sim"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Commander solitaire simulation engine compiled to WebAssembly"
 license = "MIT"
