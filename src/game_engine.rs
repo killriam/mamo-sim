@@ -218,15 +218,6 @@ pub fn run_game(
             hand_len -= 1;
             true
         } else {
-            // Check if we had a land in library we couldn't play (always false here)
-            // Missed land drop = we had no land in hand AND lands in play < turn
-            let lands_in_play = (0..n)
-                .filter(|&i| cards[i].is_land() && (i < 128) && (battlefield_mask >> i) & 1 == 1)
-                .count() as u8;
-            if lands_in_play < turn {
-                rec.total_missed_land_drops += 1;
-                if rec.first_missed_land_turn == 0 { rec.first_missed_land_turn = turn; }
-            }
             false
         };
 
@@ -271,6 +262,14 @@ pub fn run_game(
                 !c.is_land() && pool.can_pay(c)
             })
             .count() as u8;
+
+        // Snapshot castable_count and hand_size here — BEFORE the cast loop — so the
+        // fraction castable_count/hand_size uses a consistent pre-cast denominator.
+        if turn >= 1 && turn <= 6 {
+            let t = (turn - 1) as usize;
+            rec.castable_count[t] = castable_before;
+            rec.hand_size[t] = hand_len as u8;
+        }
 
         // Greedy cast loop: repeatedly cast highest-CMC castable card
         let mut spells_this_turn: u8 = 0;
@@ -388,8 +387,6 @@ pub fn run_game(
             rec.lands_in_play[t] = lands_in_play_count;
             rec.mana_available[t] = mana_total;
             rec.color_mask[t] = color_mask_now;
-            rec.castable_count[t] = castable_before;
-            rec.hand_size[t] = hand_len as u8;
             rec.cmc_top_cast[t] = cmc_top;
             rec.spells_cast_per_turn[t] = spells_this_turn;
             rec.land_played[t] = if land_played_this_turn { 1 } else { 0 };

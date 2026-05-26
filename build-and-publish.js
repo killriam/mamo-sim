@@ -1,4 +1,4 @@
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
 const readline = require("readline");
 const fs = require("fs");
 const path = require("path");
@@ -42,7 +42,7 @@ function runBuildAndPublish(commitMessage) {
         console.log("📤 Committing...");
         execSync("git add Cargo.toml Cargo.lock", { stdio: "inherit" });
         try {
-            execSync(`git commit -m "${commitMessage} (v${newVersion})"`, { stdio: "inherit" });
+            execFileSync("git", ["commit", "-m", `${commitMessage} (v${newVersion})`], { stdio: "inherit" });
         } catch {
             console.log("No changes to commit, continuing...");
         }

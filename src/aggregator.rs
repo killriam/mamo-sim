@@ -90,6 +90,11 @@ pub fn aggregate(records: &[GameRecord], mech_keys: &[String]) -> HashMap<String
             records.iter().filter(|r| r.land_played[t] == 1).count() as f64 / nf);
     }
 
+    out.insert("avg_lands_played".into(),
+        records.iter().map(|r| {
+            r.land_played.iter().map(|&p| p as f64).sum::<f64>()
+        }).sum::<f64>() / nf);
+
     // ── Focus 2: Mana per Turn + Color Availability ──────────────────
     for t in 0..6usize {
         let key_t = t + 1;
