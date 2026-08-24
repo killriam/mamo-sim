@@ -201,7 +201,6 @@ pub fn aggregate(records: &[GameRecord], mech_keys: &[String]) -> HashMap<String
 
     let mut total_assembled: f64 = 0.0;
     let mut first_assembly_turns: Vec<f64> = Vec::new();
-    let mut combo_wins: usize = 0;
     let mut partial_density_sum: f64 = 0.0;
 
     for m in 0..n_mech {
@@ -231,7 +230,7 @@ pub fn aggregate(records: &[GameRecord], mech_keys: &[String]) -> HashMap<String
     }
 
     // combo_win_rate
-    combo_wins = records.iter().filter(|r| r.combo_win()).count();
+    let combo_wins = records.iter().filter(|r| r.combo_win()).count();
     out.insert("combo_win_rate".into(), combo_wins as f64 / nf);
 
     out.insert("avg_formations_assembled".into(),

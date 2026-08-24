@@ -167,7 +167,7 @@ pub fn run_game(
     // battlefield_mask: u128 bitmask of card indices currently on battlefield
     let mut battlefield_mask: u128 = 0;
     // tapped_mask: subset of battlefield that is tapped
-    let mut tapped_mask: u128 = 0;
+    let mut tapped_mask: u128;
     // seen_mask: cards ever drawn or in opening hand (by index, u128)
     let mut seen_mask: u128 = 0;
     for i in 0..hand_len {

@@ -1,6 +1,7 @@
 /// Decoded card — one entry per physical copy in the deck.
 /// Fits in a cache line (16 bytes from wire format + padding).
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub struct SimCard {
     /// Bit flags: 0=isLand, 1=isCreature, 2=isArtifact, 3=isManaProducing, 4=isCommander
     pub flags: u8,
@@ -31,6 +32,7 @@ impl SimCard {
     #[inline] pub fn is_commander(&self)     -> bool { self.flags & 0x10 != 0 }
 
     /// True if this card stays on the battlefield (permanent types)
+    #[allow(dead_code)]
     #[inline] pub fn is_permanent(&self) -> bool {
         // Land, Creature, Artifact, Enchantment, Planeswalker — everything except instants/sorceries
         // We approximate: lands + creatures + artifacts (flag bits 0,1,2) are permanents.
@@ -41,6 +43,7 @@ impl SimCard {
 
 /// A mechanic group (formation) stripped to simulation essentials.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 pub struct SimMechanic {
     /// ActivationConditionType ordinal
     pub activation: u8,
@@ -57,6 +60,7 @@ pub struct SimMechanic {
 }
 
 /// AdvantageOutputType ordinals that matter for simulation effects.
+#[allow(dead_code)]
 pub mod advantage {
     pub const CARD_DRAW: u8       = 1;
     pub const MANA_GENERATION: u8 = 2;
@@ -145,5 +149,6 @@ impl GameRecord {
     }
 
     #[inline] pub fn combo_win(&self) -> bool { self.flags & 0x01 != 0 }
+    #[allow(dead_code)]
     #[inline] pub fn took_mulligan(&self) -> bool { self.flags & 0x02 != 0 }
 }
