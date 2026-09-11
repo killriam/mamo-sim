@@ -41,6 +41,69 @@ impl SimCard {
     }
 }
 
+/// Deck-specific mulligan scoring, decoded from the wire format's header.
+/// Mirrors MaMoFrontend's `computeHandScore`/`MulliganConfig`
+/// (src/components/scenario/MulliganValueEditor.tsx, src/types/scenario.ts) and Forge's
+/// `forge.ai.mulligan.DecklistMulliganEvaluator` — the three places that score an opening
+/// hand the same way, kept in sync by convention rather than a shared type across languages.
+pub const MAX_MULLIGAN_THRESHOLDS: usize = 4;
+
+#[derive(Clone, Copy)]
+pub struct MulliganConfig {
+    pub land_value: f32,
+    pub cmc_0_2_value: f32,
+    pub cmc_3_value: f32,
+    pub other_value: f32,
+    /// (round, min_value) pairs; only the first `threshold_count` entries are valid.
+    pub thresholds: [(u8, f32); MAX_MULLIGAN_THRESHOLDS],
+    pub threshold_count: u8,
+}
+
+impl MulliganConfig {
+    /// Matches MaMoFrontend's `DEFAULT_MULLIGAN_CONFIG` — used both as the simulator's
+    /// built-in default and as the fallback for any round a caller didn't configure.
+    pub fn default_config() -> Self {
+        MulliganConfig {
+            land_value: 1.0,
+            cmc_0_2_value: 0.8,
+            cmc_3_value: 0.5,
+            other_value: 0.3,
+            thresholds: [(0, 3.5), (1, 3.0), (2, 2.5), (3, 2.0)],
+            threshold_count: 4,
+        }
+    }
+
+    #[inline]
+    pub fn score(&self, card: &SimCard) -> f32 {
+        if card.is_land() {
+            self.land_value
+        } else if card.cmc <= 2 {
+            self.cmc_0_2_value
+        } else if card.cmc == 3 {
+            self.cmc_3_value
+        } else {
+            self.other_value
+        }
+    }
+
+    /// Minimum hand value required to keep, for the given mulligan round (0 = initial 7-card
+    /// hand). Falls back to `default_config()`'s threshold for that round if unconfigured.
+    pub fn min_value_for_round(&self, round: u8) -> f32 {
+        for i in 0..self.threshold_count as usize {
+            if self.thresholds[i].0 == round {
+                return self.thresholds[i].1;
+            }
+        }
+        let default = Self::default_config();
+        for i in 0..default.threshold_count as usize {
+            if default.thresholds[i].0 == round {
+                return default.thresholds[i].1;
+            }
+        }
+        0.0
+    }
+}
+
 /// A mechanic group (formation) stripped to simulation essentials.
 #[derive(Clone, Copy)]
 #[allow(dead_code)]

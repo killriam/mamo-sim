@@ -1,5 +1,5 @@
 use crate::rng::Rng;
-use crate::types::{advantage, GameRecord, SimCard, SimMechanic};
+use crate::types::{advantage, GameRecord, MulliganConfig, SimCard, SimMechanic};
 
 /// Maximum number of cards in the deck (Commander = 100).
 const MAX_DECK: usize = 128;
@@ -108,6 +108,7 @@ fn shuffle(deck: &mut [u8], rng: &mut Rng) {
 pub fn run_game(
     cards: &[SimCard],
     mechanics: &[SimMechanic],
+    mulligan_config: &MulliganConfig,
     rng: &mut Rng,
     max_turns: u8,
 ) -> GameRecord {
@@ -137,27 +138,28 @@ pub fn run_game(
 
     draw_n(&mut hand, &mut hand_len, &library, &mut lib_top, 7);
 
-    // Mulligan: if <2 or >5 lands, put back 1, draw 6 (max 2 mulligans)
-    for _mulligan in 0..2 {
-        let land_count = (0..hand_len).filter(|&i| cards[hand[i] as usize].is_land()).count();
-        if land_count >= 2 && land_count <= 5 { break; }
+    // Mulligan: score the hand against the deck's configured mulligan values (mirrors
+    // Playbook's computeHandScore / Forge's DecklistMulliganEvaluator — see
+    // MulliganConfig's doc comment). Swap out the single worst-scoring card and redraw if
+    // under the current round's threshold, up to twice. Not a true London mulligan (hand
+    // size never shrinks) — this keeps the pre-existing swap mechanic, just driven by a
+    // scored decision instead of a land-count race.
+    for round in 0..2u8 {
+        let hand_score: f32 = (0..hand_len)
+            .map(|i| mulligan_config.score(&cards[hand[i] as usize]))
+            .sum();
+        if hand_score >= mulligan_config.min_value_for_round(round) { break; }
         rec.flags |= 0x02; // took mulligan
-        // Return worst card (highest CMC non-land if too many lands, else worst land)
-        let return_idx = if land_count < 2 {
-            // Too few lands — return highest CMC non-land
-            (0..hand_len)
-                .filter(|&i| !cards[hand[i] as usize].is_land())
-                .max_by_key(|&i| cards[hand[i] as usize].cmc)
-                .unwrap_or(hand_len - 1)
-        } else {
-            // Too many lands — return a land
-            (0..hand_len)
-                .find(|&i| cards[hand[i] as usize].is_land())
-                .unwrap_or(hand_len - 1)
-        };
-        // Remove returned card (shift left)
-        library[lib_top.saturating_sub(1)] = hand[return_idx]; // loosely put it back (bottom)
-        hand[return_idx] = hand[hand_len - 1];
+        let worst_idx = (0..hand_len)
+            .min_by(|&a, &b| {
+                let sa = mulligan_config.score(&cards[hand[a] as usize]);
+                let sb = mulligan_config.score(&cards[hand[b] as usize]);
+                sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(hand_len - 1);
+        // Remove worst card (shift left)
+        library[lib_top.saturating_sub(1)] = hand[worst_idx]; // loosely put it back (bottom)
+        hand[worst_idx] = hand[hand_len - 1];
         hand_len -= 1;
         // Draw 1 more
         draw_n(&mut hand, &mut hand_len, &library, &mut lib_top, 1);

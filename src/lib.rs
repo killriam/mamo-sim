@@ -1,8 +1,14 @@
 mod aggregator;
-mod codec;
+/// `pub` so `mamo-Connector` (a Cargo path dependency on this crate, not just the published
+/// WASM package) can decode a buffer it built itself in tests — a direct cross-crate check
+/// that its own `encode_deck_input` (commands.rs) agrees byte-for-byte with this decoder,
+/// rather than each side trusting its own understanding of the wire format. Not part of the
+/// WASM-exported surface: wasm-pack/wasm_bindgen only binds `#[wasm_bindgen]` items to JS, so
+/// this has no effect on the published `@killriam/mamo-sim` npm package's API.
+pub mod codec;
 mod game_engine;
 mod rng;
-mod types;
+pub mod types;
 
 use wasm_bindgen::prelude::*;
 
@@ -26,7 +32,7 @@ pub fn run_batch(
     max_turns: u8,
     seed: u32,
 ) -> String {
-    let (cards, mechanics) = match codec::decode(encoded) {
+    let (cards, mechanics, mulligan_config) = match codec::decode(encoded) {
         Ok(v) => v,
         Err(e) => return format!("{{\"error\":\"{}\"}}", e),
     };
@@ -35,7 +41,7 @@ pub fn run_batch(
 
     for i in 0..games {
         let mut rng = rng::Rng::new(seed.wrapping_add(i));
-        let rec = game_engine::run_game(&cards, &mechanics, &mut rng, max_turns);
+        let rec = game_engine::run_game(&cards, &mechanics, &mulligan_config, &mut rng, max_turns);
         records.push(rec);
     }
 
@@ -81,11 +87,39 @@ mod tests {
     use crate::game_engine::run_game;
     use crate::rng::Rng;
 
+    /// Appends the wire format's mulligan-config header (default values, no explicit
+    /// thresholds — callers fall back to `MulliganConfig::default_config()`).
+    fn push_default_mulligan_header(buf: &mut Vec<u8>) {
+        push_mulligan_header(buf, 1.0, 0.8, 0.5, 0.3, &[]);
+    }
+
+    /// Appends a fully custom wire-format mulligan-config header.
+    fn push_mulligan_header(
+        buf: &mut Vec<u8>,
+        land: f32,
+        cmc_0_2: f32,
+        cmc_3: f32,
+        other: f32,
+        thresholds: &[(u8, f32)],
+    ) {
+        buf.extend_from_slice(&land.to_le_bytes());
+        buf.extend_from_slice(&cmc_0_2.to_le_bytes());
+        buf.extend_from_slice(&cmc_3.to_le_bytes());
+        buf.extend_from_slice(&other.to_le_bytes());
+        buf.push(thresholds.len() as u8);
+        buf.extend_from_slice(&[0u8; 3]); // reserved padding
+        for (round, min_value) in thresholds {
+            buf.push(*round);
+            buf.extend_from_slice(&min_value.to_le_bytes());
+        }
+    }
+
     /// Build a minimal wire-format buffer with N identical cards and no mechanics.
     fn make_encoded(card_count: usize, flags: u8, cmc: u8, color_mask: u8) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(card_count as u32).to_le_bytes()); // card_count
         buf.extend_from_slice(&0u32.to_le_bytes());                 // mechanic_count
+        push_default_mulligan_header(&mut buf);
         for _ in 0..card_count {
             buf.push(flags);       // byte 0: flags
             buf.push(cmc);         // byte 1: cmc
@@ -107,10 +141,11 @@ mod tests {
     #[test]
     fn test_decode_basic() {
         let buf = make_encoded(5, 0x01, 0, 0x01); // 5 lands
-        let (cards, mechanics) = decode(&buf).unwrap();
+        let (cards, mechanics, mulligan) = decode(&buf).unwrap();
         assert_eq!(cards.len(), 5);
         assert_eq!(mechanics.len(), 0);
         assert!(cards[0].is_land());
+        assert_eq!(mulligan.land_value, 1.0);
     }
 
     #[test]
@@ -120,6 +155,7 @@ mod tests {
         let card_count = 100u32;
         buf.extend_from_slice(&card_count.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
+        push_default_mulligan_header(&mut buf);
         for i in 0..100usize {
             let is_land = i < 37;
             let flags: u8 = if is_land { 0x09 } else { 0 }; // land=1 + mana_producing=8
@@ -133,11 +169,11 @@ mod tests {
             buf.extend_from_slice(&0u32.to_le_bytes());
         }
 
-        let (cards, mechanics) = decode(&buf).unwrap();
+        let (cards, mechanics, mulligan) = decode(&buf).unwrap();
         assert_eq!(cards.len(), 100);
 
         let mut rng = Rng::new(42);
-        let rec = run_game(&cards, &mechanics, &mut rng, 30);
+        let rec = run_game(&cards, &mechanics, &mulligan, &mut rng, 30);
 
         // After 6 turns we should have played several lands
         assert!(rec.lands_in_play[2] >= 2, "Should have ≥2 lands by turn 3, got {}", rec.lands_in_play[2]);
@@ -148,12 +184,12 @@ mod tests {
     #[test]
     fn test_reproducibility() {
         let buf = make_encoded(30, 0x09, 0, 0x20); // 30 lands with colorless mana
-        let (cards, mechanics) = decode(&buf).unwrap();
+        let (cards, mechanics, mulligan) = decode(&buf).unwrap();
 
         let mut rng1 = Rng::new(12345);
         let mut rng2 = Rng::new(12345);
-        let rec1 = run_game(&cards, &mechanics, &mut rng1, 20);
-        let rec2 = run_game(&cards, &mechanics, &mut rng2, 20);
+        let rec1 = run_game(&cards, &mechanics, &mulligan, &mut rng1, 20);
+        let rec2 = run_game(&cards, &mechanics, &mulligan, &mut rng2, 20);
 
         assert_eq!(rec1.total_turns, rec2.total_turns);
         assert_eq!(rec1.lands_in_play, rec2.lands_in_play);
@@ -163,11 +199,11 @@ mod tests {
     #[test]
     fn test_aggregator_no_nan() {
         let buf = make_encoded(100, 0x09, 0, 0x20);
-        let (cards, mechanics) = decode(&buf).unwrap();
+        let (cards, mechanics, mulligan) = decode(&buf).unwrap();
         let mut records = Vec::new();
         for i in 0..50u32 {
             let mut rng = Rng::new(i);
-            records.push(run_game(&cards, &mechanics, &mut rng, 20));
+            records.push(run_game(&cards, &mechanics, &mulligan, &mut rng, 20));
         }
         let metrics = crate::aggregator::aggregate(&records, &[]);
         for (k, v) in &metrics {
@@ -177,5 +213,63 @@ mod tests {
         assert!(metrics.contains_key("avg_turns"));
         assert!(metrics.contains_key("land_in_play_t3"));
         assert!(metrics.contains_key("castable_options_t3"));
+    }
+
+    #[test]
+    fn test_mulligan_config_default_fallback() {
+        let default = crate::types::MulliganConfig::default_config();
+        assert_eq!(default.min_value_for_round(0), 3.5);
+        assert_eq!(default.min_value_for_round(1), 3.0);
+
+        // A config that only configures round 0 falls back to the built-in default for
+        // any other round — mirrors Forge's DecklistMulliganEvaluator fallback behavior.
+        let mut partial = default;
+        partial.threshold_count = 1;
+        partial.thresholds[0] = (0, 10.0);
+        assert_eq!(partial.min_value_for_round(0), 10.0);
+        assert_eq!(partial.min_value_for_round(1), 3.0);
+    }
+
+    #[test]
+    fn test_mulligan_decision_driven_by_configured_thresholds() {
+        // A 40-card deck of nothing but 5-CMC non-lands ("other" tier, no lands at all) —
+        // deliberately unkeepable under any land-aware heuristic.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&40u32.to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        push_mulligan_header(&mut buf, 1.0, 0.8, 0.5, /* other */ 0.3, &[(0, 3.5), (1, 3.0)]);
+        for _ in 0..40u32 {
+            buf.push(0);       // flags: not a land
+            buf.push(5);       // cmc
+            buf.push(0); buf.push(0); buf.push(0);
+            buf.extend_from_slice(&[0u8; 6]);
+            buf.push(0);
+            buf.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let (cards, mechanics, default_mulligan) = decode(&buf).unwrap();
+
+        let mut rng = Rng::new(7);
+        let rec_default = run_game(&cards, &mechanics, &default_mulligan, &mut rng, 5);
+        // 7 "other" cards score 7*0.3=2.1, under the 3.5 round-0 threshold — must mulligan.
+        assert!(rec_default.took_mulligan(), "default config should mulligan an all-5-drop hand");
+
+        let mut lenient_buf = Vec::new();
+        lenient_buf.extend_from_slice(&40u32.to_le_bytes());
+        lenient_buf.extend_from_slice(&0u32.to_le_bytes());
+        push_mulligan_header(&mut lenient_buf, 1.0, 0.8, 0.5, /* other */ 5.0, &[(0, 1.0), (1, 1.0)]);
+        for _ in 0..40u32 {
+            lenient_buf.push(0);
+            lenient_buf.push(5);
+            lenient_buf.push(0); lenient_buf.push(0); lenient_buf.push(0);
+            lenient_buf.extend_from_slice(&[0u8; 6]);
+            lenient_buf.push(0);
+            lenient_buf.extend_from_slice(&0u32.to_le_bytes());
+        }
+        let (cards2, mechanics2, lenient_mulligan) = decode(&lenient_buf).unwrap();
+        let mut rng2 = Rng::new(7);
+        let rec_lenient = run_game(&cards2, &mechanics2, &lenient_mulligan, &mut rng2, 5);
+        // Same deck, same seed — only the deck's configured mulligan values changed
+        // (other_value 0.3→5.0, threshold 3.5→1.0): 7*5.0=35 >= 1.0, hand is kept.
+        assert!(!rec_lenient.took_mulligan(), "lenient config should keep the same hand");
     }
 }
