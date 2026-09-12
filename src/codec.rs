@@ -7,30 +7,37 @@ use crate::types::{MulliganConfig, SimCard, SimMechanic, MAX_MULLIGAN_THRESHOLDS
 ///   [4 bytes] card_count  (u32 LE)
 ///   [4 bytes] mechanic_count (u32 LE)
 ///   [4 bytes] mulligan land_value (f32 LE)
-///   [4 bytes] mulligan cmc_0_to_2_value (f32 LE)
-///   [4 bytes] mulligan cmc_3_value (f32 LE)
-///   [4 bytes] mulligan other_value (f32 LE)
+///   [4 bytes] mulligan mv0_value (f32 LE)
+///   [4 bytes] mulligan mv1_value (f32 LE)
+///   [4 bytes] mulligan mv2_value (f32 LE)
+///   [4 bytes] mulligan mv3_value (f32 LE)
+///   [4 bytes] mulligan mv4_value (f32 LE)
+///   [4 bytes] mulligan mv5_value (f32 LE)
+///   [4 bytes] mulligan mv6_value (f32 LE)
+///   [4 bytes] mulligan mv7Plus_value (f32 LE)
 ///   [1 byte]  mulligan threshold_count (u8)
 ///   [3 bytes] reserved padding
 ///   [threshold_count × 5 bytes] mulligan threshold records: (round: u8, min_value: f32 LE)
 ///   [card_count × 16 bytes] card records
 ///   [mechanic_count × 12 bytes] mechanic records
 pub fn decode(data: &[u8]) -> Result<(Vec<SimCard>, Vec<SimMechanic>, MulliganConfig), &'static str> {
-    if data.len() < 28 {
+    if data.len() < 48 {
         return Err("Input too short — missing header");
     }
 
     let card_count    = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
     let mechanic_count = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
 
-    let land_value      = f32::from_le_bytes([data[8], data[9], data[10], data[11]]);
-    let cmc_0_2_value   = f32::from_le_bytes([data[12], data[13], data[14], data[15]]);
-    let cmc_3_value     = f32::from_le_bytes([data[16], data[17], data[18], data[19]]);
-    let other_value     = f32::from_le_bytes([data[20], data[21], data[22], data[23]]);
-    let threshold_count_wire = data[24] as usize;
-    // data[25..28] reserved
+    let land_value = f32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+    let mut mv_values = [0f32; 8];
+    for (i, v) in mv_values.iter_mut().enumerate() {
+        let o = 12 + i * 4;
+        *v = f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+    }
+    let threshold_count_wire = data[44] as usize;
+    // data[45..48] reserved
 
-    let thresholds_base = 28usize;
+    let thresholds_base = 48usize;
     let thresholds_bytes_needed = threshold_count_wire * 5;
     if data.len() < thresholds_base + thresholds_bytes_needed {
         return Err("Input too short — truncated mulligan thresholds");
@@ -47,9 +54,7 @@ pub fn decode(data: &[u8]) -> Result<(Vec<SimCard>, Vec<SimMechanic>, MulliganCo
     }
     let mulligan = MulliganConfig {
         land_value,
-        cmc_0_2_value,
-        cmc_3_value,
-        other_value,
+        mv_values,
         thresholds,
         threshold_count: threshold_count_wire.min(MAX_MULLIGAN_THRESHOLDS) as u8,
     };

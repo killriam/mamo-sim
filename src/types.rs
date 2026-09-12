@@ -51,9 +51,9 @@ pub const MAX_MULLIGAN_THRESHOLDS: usize = 4;
 #[derive(Clone, Copy)]
 pub struct MulliganConfig {
     pub land_value: f32,
-    pub cmc_0_2_value: f32,
-    pub cmc_3_value: f32,
-    pub other_value: f32,
+    /// Standard value curve, indexed by exact mana value: index 0-6 = mana value 0-6,
+    /// index 7 = mana value 7+. Mirrors MaMoFrontend's `MulliganCardValues`/`cardValueFromCurve`.
+    pub mv_values: [f32; 8],
     /// (round, min_value) pairs; only the first `threshold_count` entries are valid.
     pub thresholds: [(u8, f32); MAX_MULLIGAN_THRESHOLDS],
     pub threshold_count: u8,
@@ -65,9 +65,7 @@ impl MulliganConfig {
     pub fn default_config() -> Self {
         MulliganConfig {
             land_value: 1.0,
-            cmc_0_2_value: 0.8,
-            cmc_3_value: 0.5,
-            other_value: 0.3,
+            mv_values: [0.85, 0.8, 0.75, 0.6, 0.45, 0.4, 0.35, 0.3],
             thresholds: [(0, 3.5), (1, 3.0), (2, 2.5), (3, 2.0)],
             threshold_count: 4,
         }
@@ -77,12 +75,8 @@ impl MulliganConfig {
     pub fn score(&self, card: &SimCard) -> f32 {
         if card.is_land() {
             self.land_value
-        } else if card.cmc <= 2 {
-            self.cmc_0_2_value
-        } else if card.cmc == 3 {
-            self.cmc_3_value
         } else {
-            self.other_value
+            self.mv_values[(card.cmc as usize).min(7)]
         }
     }
 

@@ -87,25 +87,19 @@ mod tests {
     use crate::game_engine::run_game;
     use crate::rng::Rng;
 
-    /// Appends the wire format's mulligan-config header (default values, no explicit
+    /// Appends the wire format's mulligan-config header (default curve values, no explicit
     /// thresholds — callers fall back to `MulliganConfig::default_config()`).
     fn push_default_mulligan_header(buf: &mut Vec<u8>) {
-        push_mulligan_header(buf, 1.0, 0.8, 0.5, 0.3, &[]);
+        push_mulligan_header(buf, 1.0, &[0.85, 0.8, 0.75, 0.6, 0.45, 0.4, 0.35, 0.3], &[]);
     }
 
-    /// Appends a fully custom wire-format mulligan-config header.
-    fn push_mulligan_header(
-        buf: &mut Vec<u8>,
-        land: f32,
-        cmc_0_2: f32,
-        cmc_3: f32,
-        other: f32,
-        thresholds: &[(u8, f32)],
-    ) {
+    /// Appends a fully custom wire-format mulligan-config header. `mv_values` must have
+    /// exactly 8 entries (mana value 0-6, then a 7+ catch-all), matching codec.rs's decoder.
+    fn push_mulligan_header(buf: &mut Vec<u8>, land: f32, mv_values: &[f32; 8], thresholds: &[(u8, f32)]) {
         buf.extend_from_slice(&land.to_le_bytes());
-        buf.extend_from_slice(&cmc_0_2.to_le_bytes());
-        buf.extend_from_slice(&cmc_3.to_le_bytes());
-        buf.extend_from_slice(&other.to_le_bytes());
+        for v in mv_values {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
         buf.push(thresholds.len() as u8);
         buf.extend_from_slice(&[0u8; 3]); // reserved padding
         for (round, min_value) in thresholds {
@@ -232,12 +226,17 @@ mod tests {
 
     #[test]
     fn test_mulligan_decision_driven_by_configured_thresholds() {
-        // A 40-card deck of nothing but 5-CMC non-lands ("other" tier, no lands at all) —
+        // A 40-card deck of nothing but 5-CMC non-lands (mv5 tier, no lands at all) —
         // deliberately unkeepable under any land-aware heuristic.
         let mut buf = Vec::new();
         buf.extend_from_slice(&40u32.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
-        push_mulligan_header(&mut buf, 1.0, 0.8, 0.5, /* other */ 0.3, &[(0, 3.5), (1, 3.0)]);
+        push_mulligan_header(
+            &mut buf,
+            1.0,
+            &[0.85, 0.8, 0.75, 0.6, 0.45, /* mv5 */ 0.3, 0.35, 0.3],
+            &[(0, 3.5), (1, 3.0)],
+        );
         for _ in 0..40u32 {
             buf.push(0);       // flags: not a land
             buf.push(5);       // cmc
@@ -250,13 +249,18 @@ mod tests {
 
         let mut rng = Rng::new(7);
         let rec_default = run_game(&cards, &mechanics, &default_mulligan, &mut rng, 5);
-        // 7 "other" cards score 7*0.3=2.1, under the 3.5 round-0 threshold — must mulligan.
+        // 7 mv5 cards score 7*0.3=2.1, under the 3.5 round-0 threshold — must mulligan.
         assert!(rec_default.took_mulligan(), "default config should mulligan an all-5-drop hand");
 
         let mut lenient_buf = Vec::new();
         lenient_buf.extend_from_slice(&40u32.to_le_bytes());
         lenient_buf.extend_from_slice(&0u32.to_le_bytes());
-        push_mulligan_header(&mut lenient_buf, 1.0, 0.8, 0.5, /* other */ 5.0, &[(0, 1.0), (1, 1.0)]);
+        push_mulligan_header(
+            &mut lenient_buf,
+            1.0,
+            &[0.85, 0.8, 0.75, 0.6, 0.45, /* mv5 */ 5.0, 0.35, 0.3],
+            &[(0, 1.0), (1, 1.0)],
+        );
         for _ in 0..40u32 {
             lenient_buf.push(0);
             lenient_buf.push(5);
@@ -269,7 +273,7 @@ mod tests {
         let mut rng2 = Rng::new(7);
         let rec_lenient = run_game(&cards2, &mechanics2, &lenient_mulligan, &mut rng2, 5);
         // Same deck, same seed — only the deck's configured mulligan values changed
-        // (other_value 0.3→5.0, threshold 3.5→1.0): 7*5.0=35 >= 1.0, hand is kept.
+        // (mv5 value 0.3→5.0, threshold 3.5→1.0): 7*5.0=35 >= 1.0, hand is kept.
         assert!(!rec_lenient.took_mulligan(), "lenient config should keep the same hand");
     }
 }
