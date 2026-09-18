@@ -36,12 +36,22 @@ pub fn run_batch(
         Ok(v) => v,
         Err(e) => return format!("{{\"error\":\"{}\"}}", e),
     };
+    // Computed once per batch, not per game — every game in a batch shares the same deck, so
+    // recomputing this per game would redo identical work `games` times over.
+    let pip_weights = types::compute_deck_pip_weights(&cards);
 
     let mut records = Vec::with_capacity(games as usize);
 
     for i in 0..games {
         let mut rng = rng::Rng::new(seed.wrapping_add(i));
-        let rec = game_engine::run_game(&cards, &mechanics, &mulligan_config, &mut rng, max_turns);
+        let rec = game_engine::run_game(
+            &cards,
+            &mechanics,
+            &mulligan_config,
+            &pip_weights,
+            &mut rng,
+            max_turns,
+        );
         records.push(rec);
     }
 
@@ -165,9 +175,10 @@ mod tests {
 
         let (cards, mechanics, mulligan) = decode(&buf).unwrap();
         assert_eq!(cards.len(), 100);
+        let pip_weights = crate::types::compute_deck_pip_weights(&cards);
 
         let mut rng = Rng::new(42);
-        let rec = run_game(&cards, &mechanics, &mulligan, &mut rng, 30);
+        let rec = run_game(&cards, &mechanics, &mulligan, &pip_weights, &mut rng, 30);
 
         // After 6 turns we should have played several lands
         assert!(rec.lands_in_play[2] >= 2, "Should have ≥2 lands by turn 3, got {}", rec.lands_in_play[2]);
@@ -179,11 +190,12 @@ mod tests {
     fn test_reproducibility() {
         let buf = make_encoded(30, 0x09, 0, 0x20); // 30 lands with colorless mana
         let (cards, mechanics, mulligan) = decode(&buf).unwrap();
+        let pip_weights = crate::types::compute_deck_pip_weights(&cards);
 
         let mut rng1 = Rng::new(12345);
         let mut rng2 = Rng::new(12345);
-        let rec1 = run_game(&cards, &mechanics, &mulligan, &mut rng1, 20);
-        let rec2 = run_game(&cards, &mechanics, &mulligan, &mut rng2, 20);
+        let rec1 = run_game(&cards, &mechanics, &mulligan, &pip_weights, &mut rng1, 20);
+        let rec2 = run_game(&cards, &mechanics, &mulligan, &pip_weights, &mut rng2, 20);
 
         assert_eq!(rec1.total_turns, rec2.total_turns);
         assert_eq!(rec1.lands_in_play, rec2.lands_in_play);
@@ -194,10 +206,11 @@ mod tests {
     fn test_aggregator_no_nan() {
         let buf = make_encoded(100, 0x09, 0, 0x20);
         let (cards, mechanics, mulligan) = decode(&buf).unwrap();
+        let pip_weights = crate::types::compute_deck_pip_weights(&cards);
         let mut records = Vec::new();
         for i in 0..50u32 {
             let mut rng = Rng::new(i);
-            records.push(run_game(&cards, &mechanics, &mulligan, &mut rng, 20));
+            records.push(run_game(&cards, &mechanics, &mulligan, &pip_weights, &mut rng, 20));
         }
         let metrics = crate::aggregator::aggregate(&records, &[]);
         for (k, v) in &metrics {
@@ -246,9 +259,10 @@ mod tests {
             buf.extend_from_slice(&0u32.to_le_bytes());
         }
         let (cards, mechanics, default_mulligan) = decode(&buf).unwrap();
+        let pip_weights = crate::types::compute_deck_pip_weights(&cards);
 
         let mut rng = Rng::new(7);
-        let rec_default = run_game(&cards, &mechanics, &default_mulligan, &mut rng, 5);
+        let rec_default = run_game(&cards, &mechanics, &default_mulligan, &pip_weights, &mut rng, 5);
         // 7 mv5 cards score 7*0.3=2.1, under the 3.5 round-0 threshold — must mulligan.
         assert!(rec_default.took_mulligan(), "default config should mulligan an all-5-drop hand");
 
@@ -270,10 +284,117 @@ mod tests {
             lenient_buf.extend_from_slice(&0u32.to_le_bytes());
         }
         let (cards2, mechanics2, lenient_mulligan) = decode(&lenient_buf).unwrap();
+        let pip_weights2 = crate::types::compute_deck_pip_weights(&cards2);
         let mut rng2 = Rng::new(7);
-        let rec_lenient = run_game(&cards2, &mechanics2, &lenient_mulligan, &mut rng2, 5);
+        let rec_lenient =
+            run_game(&cards2, &mechanics2, &lenient_mulligan, &pip_weights2, &mut rng2, 5);
         // Same deck, same seed — only the deck's configured mulligan values changed
         // (mv5 value 0.3→5.0, threshold 3.5→1.0): 7*5.0=35 >= 1.0, hand is kept.
         assert!(!rec_lenient.took_mulligan(), "lenient config should keep the same hand");
+    }
+
+    // ==================== New formula rules: multicolor lands, X-cost, MV4+ cap ====================
+    //
+    // These construct `SimCard`/`DeckPipWeights` directly rather than through the wire format —
+    // `compute_deck_pip_weights`, `multicolor_land_multiplier`, and `MulliganConfig::score` are
+    // pure functions over already-decoded types, so there's nothing wire-format-specific to
+    // exercise here (that's covered separately by the mulligan-header decode tests above).
+
+    fn make_sim_card(flags: u8, cmc: u8, color_mask: u8, mana_w: u8, mana_u: u8, mana_b: u8, mana_r: u8, mana_g: u8) -> crate::types::SimCard {
+        crate::types::SimCard {
+            flags,
+            cmc,
+            power: 0,
+            toughness: 0,
+            color_mask,
+            mana_w,
+            mana_u,
+            mana_b,
+            mana_r,
+            mana_g,
+            mana_generic: 0,
+            formation_role: 0,
+            mechanic_mask: 0,
+        }
+    }
+
+    #[test]
+    fn test_compute_deck_pip_weights_skews_toward_heavier_color() {
+        let cards = vec![
+            make_sim_card(0, 2, 0, 0, 0, 0, 3, 0), // non-land, 3 red pips
+            make_sim_card(0, 1, 0, 0, 1, 0, 0, 0), // non-land, 1 blue pip
+            make_sim_card(0x01, 0, 0x08, 0, 0, 0, 0, 0), // a land — its own pips are ignored
+        ];
+        let weights = crate::types::compute_deck_pip_weights(&cards);
+        assert!((weights.r - 0.75).abs() < 1e-6, "expected r=0.75, got {}", weights.r);
+        assert!((weights.u - 0.25).abs() < 1e-6, "expected u=0.25, got {}", weights.u);
+        assert_eq!(weights.w, 0.0);
+    }
+
+    #[test]
+    fn test_compute_deck_pip_weights_all_zero_when_no_colored_pips() {
+        let cards = vec![make_sim_card(0x01, 0, 0x20, 0, 0, 0, 0, 0)]; // one colorless land
+        let weights = crate::types::compute_deck_pip_weights(&cards);
+        assert_eq!(weights.w, 0.0);
+        assert_eq!(weights.u, 0.0);
+        assert_eq!(weights.g, 0.0);
+    }
+
+    #[test]
+    fn test_multicolor_land_multiplier_mono_color_unaffected() {
+        let weights = crate::types::DeckPipWeights { w: 0.0, u: 1.0, b: 0.0, r: 0.0, g: 0.0 };
+        // color_mask 0x02 = produces U only
+        assert_eq!(crate::types::multicolor_land_multiplier(0x02, &weights), 1.0);
+    }
+
+    #[test]
+    fn test_multicolor_land_multiplier_full_coverage_hits_cap() {
+        let weights = crate::types::DeckPipWeights { w: 0.6, u: 0.4, b: 0.0, r: 0.0, g: 0.0 };
+        // color_mask 0x01 | 0x02 = produces W and U, covering 100% of the deck's pips
+        let multiplier = crate::types::multicolor_land_multiplier(0x01 | 0x02, &weights);
+        assert!((multiplier - 1.4).abs() < 1e-6, "expected 1.4, got {}", multiplier);
+    }
+
+    #[test]
+    fn test_multicolor_land_multiplier_barely_used_splash_stays_near_one() {
+        let weights = crate::types::DeckPipWeights { w: 0.95, u: 0.05, b: 0.0, r: 0.0, g: 0.0 };
+        let multiplier = crate::types::multicolor_land_multiplier(0x01 | 0x02, &weights);
+        assert!((multiplier - 1.4).abs() < 1e-6, "covers 100% of pips (w+u) so still hits the cap");
+        // A land covering only the barely-used color plus one totally-unused one should be low.
+        let weights2 = crate::types::DeckPipWeights { w: 0.95, u: 0.05, b: 0.0, r: 0.0, g: 0.0 };
+        let low_multiplier = crate::types::multicolor_land_multiplier(0x02 | 0x04, &weights2); // U+B
+        assert!(low_multiplier < 1.1, "expected close to 1.0, got {}", low_multiplier);
+    }
+
+    #[test]
+    fn test_score_x_cost_shifts_effective_mana_value() {
+        let config = crate::types::MulliganConfig::default_config();
+        let weights = crate::types::DeckPipWeights::default();
+
+        let plain = make_sim_card(0, 0, 0, 0, 0, 0, 0, 0); // non-land, cmc 0, no X
+        let x_cost = make_sim_card(0x20, 0, 0, 0, 0, 0, 0, 0); // non-land, cmc 0, X flag set
+
+        assert_eq!(config.score(&plain, &weights), config.mv_values[0]);
+        assert_eq!(config.score(&x_cost, &weights), config.mv_values[2]); // 0 + 2 = mv2
+    }
+
+    #[test]
+    fn test_score_land_applies_multicolor_multiplier() {
+        let config = crate::types::MulliganConfig::default_config();
+        let weights = crate::types::DeckPipWeights { w: 0.5, u: 0.5, b: 0.0, r: 0.0, g: 0.0 };
+
+        // is_land flag (0x01), produces W+U (color_mask 0x01 | 0x02)
+        let dual_land = make_sim_card(0x01, 0, 0x01 | 0x02, 0, 0, 0, 0, 0);
+        let value = config.score(&dual_land, &weights);
+        assert!((value - config.land_value * 1.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_default_config_caps_mv4_plus_at_point_two() {
+        let config = crate::types::MulliganConfig::default_config();
+        assert_eq!(config.mv_values[4], 0.2);
+        assert_eq!(config.mv_values[5], 0.2);
+        assert_eq!(config.mv_values[6], 0.2);
+        assert_eq!(config.mv_values[7], 0.2);
     }
 }

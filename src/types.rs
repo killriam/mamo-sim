@@ -3,7 +3,9 @@
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
 pub struct SimCard {
-    /// Bit flags: 0=isLand, 1=isCreature, 2=isArtifact, 3=isManaProducing, 4=isCommander
+    /// Bit flags: 0=isLand, 1=isCreature, 2=isArtifact, 3=isManaProducing, 4=isCommander,
+    /// 5=hasXCost (mulligan-scoring only — never affects `cmc`, which stays the real mana
+    /// value used everywhere else: castability, land-drop tracking, `is_permanent()`, etc.)
     pub flags: u8,
     /// Converted mana cost (capped at 15)
     pub cmc: u8,
@@ -30,6 +32,7 @@ impl SimCard {
     #[inline] pub fn is_creature(&self)      -> bool { self.flags & 0x02 != 0 }
     #[inline] pub fn is_mana_producing(&self)-> bool { self.flags & 0x08 != 0 }
     #[inline] pub fn is_commander(&self)     -> bool { self.flags & 0x10 != 0 }
+    #[inline] pub fn is_x_cost(&self)        -> bool { self.flags & 0x20 != 0 }
 
     /// True if this card stays on the battlefield (permanent types)
     #[allow(dead_code)]
@@ -59,24 +62,100 @@ pub struct MulliganConfig {
     pub threshold_count: u8,
 }
 
+/// Deck-wide colored-pip weight per color: each color's share (0.0-1.0, summing to 1 across
+/// all five) of the deck's total colored mana pips in non-land cards. All-zero if the deck has
+/// no colored pips at all. Mirrors MaMoFrontend's `DeckPipWeights`/`computeDeckPipWeights`
+/// (`MulliganValueEditor.tsx`) — used to score how well a multicolor land's color-fixing
+/// matches what the deck actually needs.
+#[derive(Clone, Copy, Default)]
+pub struct DeckPipWeights {
+    pub w: f32,
+    pub u: f32,
+    pub b: f32,
+    pub r: f32,
+    pub g: f32,
+}
+
+/// Computed once per batch (all games in a batch share the same deck), not per game — an
+/// O(games × cards) redundant pass would otherwise redo identical work on every simulated game.
+pub fn compute_deck_pip_weights(cards: &[SimCard]) -> DeckPipWeights {
+    let mut total_w = 0u32;
+    let mut total_u = 0u32;
+    let mut total_b = 0u32;
+    let mut total_r = 0u32;
+    let mut total_g = 0u32;
+
+    for card in cards {
+        if card.is_land() {
+            continue;
+        }
+        total_w += card.mana_w as u32;
+        total_u += card.mana_u as u32;
+        total_b += card.mana_b as u32;
+        total_r += card.mana_r as u32;
+        total_g += card.mana_g as u32;
+    }
+
+    let total = (total_w + total_u + total_b + total_r + total_g) as f32;
+    if total == 0.0 {
+        return DeckPipWeights::default();
+    }
+
+    DeckPipWeights {
+        w: total_w as f32 / total,
+        u: total_u as f32 / total,
+        b: total_b as f32 / total,
+        r: total_r as f32 / total,
+        g: total_g as f32 / total,
+    }
+}
+
+/// Value multiplier for a land producing the colors in `color_mask`, from 1.0 (mono-color/
+/// colorless — unaffected) up to 1.4 (produces every color the deck's pips are weighted
+/// toward). Mirrors MaMoFrontend's `multicolorLandMultiplier`. Uses the same `color_mask` bit
+/// convention as everywhere else in this crate: W=0x01, U=0x02, B=0x04, R=0x08, G=0x10.
+pub fn multicolor_land_multiplier(color_mask: u8, pip_weights: &DeckPipWeights) -> f32 {
+    let mut producing_count = 0u8;
+    let mut coverage = 0.0f32;
+    if color_mask & 0x01 != 0 { producing_count += 1; coverage += pip_weights.w; }
+    if color_mask & 0x02 != 0 { producing_count += 1; coverage += pip_weights.u; }
+    if color_mask & 0x04 != 0 { producing_count += 1; coverage += pip_weights.b; }
+    if color_mask & 0x08 != 0 { producing_count += 1; coverage += pip_weights.r; }
+    if color_mask & 0x10 != 0 { producing_count += 1; coverage += pip_weights.g; }
+    if producing_count < 2 {
+        return 1.0;
+    }
+    1.0 + 0.4 * coverage.min(1.0)
+}
+
 impl MulliganConfig {
     /// Matches MaMoFrontend's `DEFAULT_MULLIGAN_CONFIG` — used both as the simulator's
     /// built-in default and as the fallback for any round a caller didn't configure.
     pub fn default_config() -> Self {
         MulliganConfig {
             land_value: 1.0,
-            mv_values: [0.85, 0.8, 0.75, 0.6, 0.45, 0.4, 0.35, 0.3],
+            // mv4+ capped at 0.2: mana value 4+ is worth meaningfully less to see in an
+            // opening hand.
+            mv_values: [0.85, 0.8, 0.75, 0.6, 0.2, 0.2, 0.2, 0.2],
             thresholds: [(0, 3.5), (1, 3.0), (2, 2.5), (3, 2.0)],
             threshold_count: 4,
         }
     }
 
+    /// Scores a single card: X-cost non-lands (mulligan scoring only — `card.cmc` itself, used
+    /// everywhere else, is untouched) count as +2 mana value before the curve lookup; lands
+    /// producing 2+ colors are boosted by `multicolor_land_multiplier`.
     #[inline]
-    pub fn score(&self, card: &SimCard) -> f32 {
+    pub fn score(&self, card: &SimCard, pip_weights: &DeckPipWeights) -> f32 {
         if card.is_land() {
-            self.land_value
+            self.land_value * multicolor_land_multiplier(card.color_mask, pip_weights)
         } else {
-            self.mv_values[(card.cmc as usize).min(7)]
+            let effective_cmc = if card.is_x_cost() {
+                (card.cmc as u16 + 2).min(7) as u8
+            } else {
+                card.cmc.min(7)
+            };
+            self.mv_values[effective_cmc as usize]
         }
     }
 

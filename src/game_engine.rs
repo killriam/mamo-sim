@@ -1,5 +1,5 @@
 use crate::rng::Rng;
-use crate::types::{advantage, GameRecord, MulliganConfig, SimCard, SimMechanic};
+use crate::types::{advantage, DeckPipWeights, GameRecord, MulliganConfig, SimCard, SimMechanic};
 
 /// Maximum number of cards in the deck (Commander = 100).
 const MAX_DECK: usize = 128;
@@ -109,6 +109,7 @@ pub fn run_game(
     cards: &[SimCard],
     mechanics: &[SimMechanic],
     mulligan_config: &MulliganConfig,
+    pip_weights: &DeckPipWeights,
     rng: &mut Rng,
     max_turns: u8,
 ) -> GameRecord {
@@ -146,14 +147,14 @@ pub fn run_game(
     // scored decision instead of a land-count race.
     for round in 0..2u8 {
         let hand_score: f32 = (0..hand_len)
-            .map(|i| mulligan_config.score(&cards[hand[i] as usize]))
+            .map(|i| mulligan_config.score(&cards[hand[i] as usize], pip_weights))
             .sum();
         if hand_score >= mulligan_config.min_value_for_round(round) { break; }
         rec.flags |= 0x02; // took mulligan
         let worst_idx = (0..hand_len)
             .min_by(|&a, &b| {
-                let sa = mulligan_config.score(&cards[hand[a] as usize]);
-                let sb = mulligan_config.score(&cards[hand[b] as usize]);
+                let sa = mulligan_config.score(&cards[hand[a] as usize], pip_weights);
+                let sb = mulligan_config.score(&cards[hand[b] as usize], pip_weights);
                 sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
             })
             .unwrap_or(hand_len - 1);
