@@ -1,5 +1,7 @@
 use crate::rng::Rng;
-use crate::types::{advantage, DeckPipWeights, GameRecord, MulliganConfig, SimCard, SimMechanic};
+use crate::types::{
+    advantage, mana_base_value, DeckPipWeights, GameRecord, MulliganConfig, SimCard, SimMechanic,
+};
 
 /// Maximum number of cards in the deck (Commander = 100).
 const MAX_DECK: usize = 128;
@@ -139,28 +141,42 @@ pub fn run_game(
 
     draw_n(&mut hand, &mut hand_len, &library, &mut lib_top, 7);
 
-    // Mulligan: score the hand against the deck's configured mulligan values (mirrors
-    // Playbook's computeHandScore / Forge's DecklistMulliganEvaluator — see
-    // MulliganConfig's doc comment). Swap out the single worst-scoring card and redraw if
-    // under the current round's threshold, up to twice. Not a true London mulligan (hand
-    // size never shrinks) — this keeps the pre-existing swap mechanic, just driven by a
-    // scored decision instead of a land-count race.
-    for round in 0..2u8 {
-        let hand_score: f32 = (0..hand_len)
-            .map(|i| mulligan_config.score(&cards[hand[i] as usize], pip_weights))
+    // Mulligan: this is the AI hand-draw criteria — keep only if the hand's Mana Base (lands +
+    // cheap mana rocks, see `mana_base_value`) falls inside the deck's fixed
+    // [mana_base_min, mana_base_max] band (mirrors MaMoFrontend's `computeManaBase` — the same
+    // double-sided band it exposes as `isGoodAiHand`). Below the band: swap out the single
+    // worst (lowest Mana Base) card for a chance at more mana. Above the band: swap out the
+    // single best (highest Mana Base) card to make room for actual spells. Up to twice. Not a
+    // true London mulligan (hand size never shrinks) — this keeps the pre-existing swap
+    // mechanic, just driven by the Mana Base band instead of the old curve-based score.
+    for _round in 0..2u8 {
+        let hand_mana_base: f32 = (0..hand_len)
+            .map(|i| mana_base_value(&cards[hand[i] as usize], pip_weights))
             .sum();
-        if hand_score >= mulligan_config.min_value_for_round(round) { break; }
+        let too_little = hand_mana_base < mulligan_config.mana_base_min;
+        let too_much = hand_mana_base > mulligan_config.mana_base_max;
+        if !too_little && !too_much { break; }
         rec.flags |= 0x02; // took mulligan
-        let worst_idx = (0..hand_len)
-            .min_by(|&a, &b| {
-                let sa = mulligan_config.score(&cards[hand[a] as usize], pip_weights);
-                let sb = mulligan_config.score(&cards[hand[b] as usize], pip_weights);
-                sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap_or(hand_len - 1);
-        // Remove worst card (shift left)
-        library[lib_top.saturating_sub(1)] = hand[worst_idx]; // loosely put it back (bottom)
-        hand[worst_idx] = hand[hand_len - 1];
+        let swap_idx = if too_little {
+            (0..hand_len)
+                .min_by(|&a, &b| {
+                    let sa = mana_base_value(&cards[hand[a] as usize], pip_weights);
+                    let sb = mana_base_value(&cards[hand[b] as usize], pip_weights);
+                    sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(hand_len - 1)
+        } else {
+            (0..hand_len)
+                .max_by(|&a, &b| {
+                    let sa = mana_base_value(&cards[hand[a] as usize], pip_weights);
+                    let sb = mana_base_value(&cards[hand[b] as usize], pip_weights);
+                    sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(hand_len - 1)
+        };
+        // Remove the swapped-out card (shift left)
+        library[lib_top.saturating_sub(1)] = hand[swap_idx]; // loosely put it back (bottom)
+        hand[swap_idx] = hand[hand_len - 1];
         hand_len -= 1;
         // Draw 1 more
         draw_n(&mut hand, &mut hand_len, &library, &mut lib_top, 1);

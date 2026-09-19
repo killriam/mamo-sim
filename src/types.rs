@@ -5,7 +5,9 @@
 pub struct SimCard {
     /// Bit flags: 0=isLand, 1=isCreature, 2=isArtifact, 3=isManaProducing, 4=isCommander,
     /// 5=hasXCost (mulligan-scoring only — never affects `cmc`, which stays the real mana
-    /// value used everywhere else: castability, land-drop tracking, `is_permanent()`, etc.)
+    /// value used everywhere else: castability, land-drop tracking, `is_permanent()`, etc.),
+    /// 6=isBasicLand, 7=entersTappedOrConditional (both land-only, both Mana Base scoring only
+    /// — see `mana_base_value`).
     pub flags: u8,
     /// Converted mana cost (capped at 15)
     pub cmc: u8,
@@ -33,6 +35,8 @@ impl SimCard {
     #[inline] pub fn is_mana_producing(&self)-> bool { self.flags & 0x08 != 0 }
     #[inline] pub fn is_commander(&self)     -> bool { self.flags & 0x10 != 0 }
     #[inline] pub fn is_x_cost(&self)        -> bool { self.flags & 0x20 != 0 }
+    #[inline] pub fn is_basic_land(&self)    -> bool { self.flags & 0x40 != 0 }
+    #[inline] pub fn enters_tapped_or_conditional(&self) -> bool { self.flags & 0x80 != 0 }
 
     /// True if this card stays on the battlefield (permanent types)
     #[allow(dead_code)]
@@ -56,10 +60,19 @@ pub struct MulliganConfig {
     pub land_value: f32,
     /// Standard value curve, indexed by exact mana value: index 0-6 = mana value 0-6,
     /// index 7 = mana value 7+. Mirrors MaMoFrontend's `MulliganCardValues`/`cardValueFromCurve`.
+    /// Only used by the legacy `score()`/curve-based path — `mana_base_value` (the actual
+    /// keep/mulligan-driving score as of this round) never reads it.
     pub mv_values: [f32; 8],
-    /// (round, min_value) pairs; only the first `threshold_count` entries are valid.
+    /// (round, min_value) pairs; only the first `threshold_count` entries are valid. Legacy —
+    /// no longer drives the keep/mulligan decision (`mana_base_min`/`_max` do that now), kept
+    /// only so `min_value_for_round` still resolves for any caller still using it.
     pub thresholds: [(u8, f32); MAX_MULLIGAN_THRESHOLDS],
     pub threshold_count: u8,
+    /// Fixed Mana Base band — mirrors MaMoFrontend's `MulliganConfig.mana_base_min`/`_max`.
+    /// Below `mana_base_min` is too little mana; above `mana_base_max` is too much. This is
+    /// the actual AI hand-draw criteria `run_game` redraws against (see `game_engine.rs`).
+    pub mana_base_min: f32,
+    pub mana_base_max: f32,
 }
 
 /// Deck-wide colored-pip weight per color: each color's share (0.0-1.0, summing to 1 across
@@ -128,6 +141,48 @@ pub fn multicolor_land_multiplier(color_mask: u8, pip_weights: &DeckPipWeights) 
     1.0 + 0.4 * coverage.min(1.0)
 }
 
+/// A card's Mana Base value — the actual keep/mulligan-driving score (lands + cheap mana rocks
+/// only), independent of `MulliganConfig.mv_values`/thresholds entirely. Mirrors MaMoFrontend's
+/// `computeManaBaseCardValue` (`MulliganValueEditor.tsx`) — both sides must stay in sync:
+///   - Basic land: 1.0
+///   - Non-basic land producing exactly one color: 0.8 if `enters_tapped_or_conditional`, else 1.0
+///   - Land producing 2+ colors: `multicolor_land_multiplier` (1.0-1.4)
+///   - Non-land, mana-producing, cmc 0: 1.0 (extrapolated — real 0-cost mana rocks are rare)
+///   - Non-land, mana-producing, cmc 1: 0.9
+///   - Non-land, mana-producing, cmc 2: 0.6
+///   - Everything else: 0.0
+///
+/// Known gap vs. MaMoFrontend's version: `SimCard.flags` has no spare bit left (0-7 are all
+/// assigned) to represent "true non-mana utility land" (Maze of Ith, Dark Depths, etc. —
+/// MaMoFrontend's `parseLandFace` detects these by name/oracle text). Here, such a land is
+/// indistinguishable from a normal untapped mono land and scores 1.0 instead of 0 — a rare,
+/// disclosed simplification; fixing it would need a wire-format size increase, not just a bit.
+pub fn mana_base_value(card: &SimCard, pip_weights: &DeckPipWeights) -> f32 {
+    if card.is_land() {
+        let producing_count = [0x01u8, 0x02, 0x04, 0x08, 0x10]
+            .iter()
+            .filter(|&&bit| card.color_mask & bit != 0)
+            .count();
+        if producing_count >= 2 {
+            return multicolor_land_multiplier(card.color_mask, pip_weights);
+        }
+        if card.is_basic_land() {
+            return 1.0;
+        }
+        return if card.enters_tapped_or_conditional() { 0.8 } else { 1.0 };
+    }
+
+    if !card.is_mana_producing() {
+        return 0.0;
+    }
+    match card.cmc {
+        0 => 1.0,
+        1 => 0.9,
+        2 => 0.6,
+        _ => 0.0,
+    }
+}
+
 impl MulliganConfig {
     /// Matches MaMoFrontend's `DEFAULT_MULLIGAN_CONFIG` — used both as the simulator's
     /// built-in default and as the fallback for any round a caller didn't configure.
@@ -139,6 +194,8 @@ impl MulliganConfig {
             mv_values: [0.85, 0.8, 0.75, 0.6, 0.2, 0.2, 0.2, 0.2],
             thresholds: [(0, 3.5), (1, 3.0), (2, 2.5), (3, 2.0)],
             threshold_count: 4,
+            mana_base_min: 3.0,
+            mana_base_max: 4.0,
         }
     }
 

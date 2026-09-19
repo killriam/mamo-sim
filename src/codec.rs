@@ -15,13 +15,15 @@ use crate::types::{MulliganConfig, SimCard, SimMechanic, MAX_MULLIGAN_THRESHOLDS
 ///   [4 bytes] mulligan mv5_value (f32 LE)
 ///   [4 bytes] mulligan mv6_value (f32 LE)
 ///   [4 bytes] mulligan mv7Plus_value (f32 LE)
+///   [4 bytes] mana_base_min (f32 LE)
+///   [4 bytes] mana_base_max (f32 LE)
 ///   [1 byte]  mulligan threshold_count (u8)
 ///   [3 bytes] reserved padding
 ///   [threshold_count × 5 bytes] mulligan threshold records: (round: u8, min_value: f32 LE)
 ///   [card_count × 16 bytes] card records
 ///   [mechanic_count × 12 bytes] mechanic records
 pub fn decode(data: &[u8]) -> Result<(Vec<SimCard>, Vec<SimMechanic>, MulliganConfig), &'static str> {
-    if data.len() < 48 {
+    if data.len() < 56 {
         return Err("Input too short — missing header");
     }
 
@@ -34,10 +36,12 @@ pub fn decode(data: &[u8]) -> Result<(Vec<SimCard>, Vec<SimMechanic>, MulliganCo
         let o = 12 + i * 4;
         *v = f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
     }
-    let threshold_count_wire = data[44] as usize;
-    // data[45..48] reserved
+    let mana_base_min = f32::from_le_bytes([data[44], data[45], data[46], data[47]]);
+    let mana_base_max = f32::from_le_bytes([data[48], data[49], data[50], data[51]]);
+    let threshold_count_wire = data[52] as usize;
+    // data[53..56] reserved
 
-    let thresholds_base = 48usize;
+    let thresholds_base = 56usize;
     let thresholds_bytes_needed = threshold_count_wire * 5;
     if data.len() < thresholds_base + thresholds_bytes_needed {
         return Err("Input too short — truncated mulligan thresholds");
@@ -57,6 +61,8 @@ pub fn decode(data: &[u8]) -> Result<(Vec<SimCard>, Vec<SimMechanic>, MulliganCo
         mv_values,
         thresholds,
         threshold_count: threshold_count_wire.min(MAX_MULLIGAN_THRESHOLDS) as u8,
+        mana_base_min,
+        mana_base_max,
     };
 
     let card_base = thresholds_base + thresholds_bytes_needed;

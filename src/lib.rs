@@ -97,19 +97,35 @@ mod tests {
     use crate::game_engine::run_game;
     use crate::rng::Rng;
 
-    /// Appends the wire format's mulligan-config header (default curve values, no explicit
-    /// thresholds — callers fall back to `MulliganConfig::default_config()`).
+    /// Appends the wire format's mulligan-config header (default curve values, default Mana
+    /// Base band, no explicit thresholds — callers fall back to `MulliganConfig::default_config()`).
     fn push_default_mulligan_header(buf: &mut Vec<u8>) {
-        push_mulligan_header(buf, 1.0, &[0.85, 0.8, 0.75, 0.6, 0.45, 0.4, 0.35, 0.3], &[]);
+        push_mulligan_header_full(
+            buf,
+            1.0,
+            &[0.85, 0.8, 0.75, 0.6, 0.45, 0.4, 0.35, 0.3],
+            3.0,
+            4.0,
+            &[],
+        );
     }
 
     /// Appends a fully custom wire-format mulligan-config header. `mv_values` must have
     /// exactly 8 entries (mana value 0-6, then a 7+ catch-all), matching codec.rs's decoder.
-    fn push_mulligan_header(buf: &mut Vec<u8>, land: f32, mv_values: &[f32; 8], thresholds: &[(u8, f32)]) {
+    fn push_mulligan_header_full(
+        buf: &mut Vec<u8>,
+        land: f32,
+        mv_values: &[f32; 8],
+        mana_base_min: f32,
+        mana_base_max: f32,
+        thresholds: &[(u8, f32)],
+    ) {
         buf.extend_from_slice(&land.to_le_bytes());
         for v in mv_values {
             buf.extend_from_slice(&v.to_le_bytes());
         }
+        buf.extend_from_slice(&mana_base_min.to_le_bytes());
+        buf.extend_from_slice(&mana_base_max.to_le_bytes());
         buf.push(thresholds.len() as u8);
         buf.extend_from_slice(&[0u8; 3]); // reserved padding
         for (round, min_value) in thresholds {
@@ -238,22 +254,25 @@ mod tests {
     }
 
     #[test]
-    fn test_mulligan_decision_driven_by_configured_thresholds() {
-        // A 40-card deck of nothing but 5-CMC non-lands (mv5 tier, no lands at all) —
-        // deliberately unkeepable under any land-aware heuristic.
+    fn test_mulligan_decision_driven_by_mana_base_band() {
+        // A 40-card deck of nothing but basic lands — every possible 7-card hand has Mana Base
+        // exactly 7.0, deterministically (all 40 cards are identical, so shuffle order can't
+        // change the outcome).
         let mut buf = Vec::new();
         buf.extend_from_slice(&40u32.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
-        push_mulligan_header(
+        push_mulligan_header_full(
             &mut buf,
             1.0,
-            &[0.85, 0.8, 0.75, 0.6, 0.45, /* mv5 */ 0.3, 0.35, 0.3],
-            &[(0, 3.5), (1, 3.0)],
+            &[0.85, 0.8, 0.75, 0.6, 0.45, 0.4, 0.35, 0.3],
+            3.0,
+            4.0, // default band — a 7-land hand (Mana Base 7.0) is well over the max
+            &[],
         );
         for _ in 0..40u32 {
-            buf.push(0);       // flags: not a land
-            buf.push(5);       // cmc
-            buf.push(0); buf.push(0); buf.push(0);
+            buf.push(0x41); // flags: isLand (0x01) + isBasicLand (0x40)
+            buf.push(0);    // cmc
+            buf.push(0); buf.push(0); buf.push(0); // toughness, color_mask (unused: basic-land branch short-circuits)
             buf.extend_from_slice(&[0u8; 6]);
             buf.push(0);
             buf.extend_from_slice(&0u32.to_le_bytes());
@@ -263,34 +282,40 @@ mod tests {
 
         let mut rng = Rng::new(7);
         let rec_default = run_game(&cards, &mechanics, &default_mulligan, &pip_weights, &mut rng, 5);
-        // 7 mv5 cards score 7*0.3=2.1, under the 3.5 round-0 threshold — must mulligan.
-        assert!(rec_default.took_mulligan(), "default config should mulligan an all-5-drop hand");
+        assert!(
+            rec_default.took_mulligan(),
+            "an all-land hand (Mana Base 7.0) should be rejected as too much mana under the default 3.0-4.0 band"
+        );
 
-        let mut lenient_buf = Vec::new();
-        lenient_buf.extend_from_slice(&40u32.to_le_bytes());
-        lenient_buf.extend_from_slice(&0u32.to_le_bytes());
-        push_mulligan_header(
-            &mut lenient_buf,
+        let mut wide_buf = Vec::new();
+        wide_buf.extend_from_slice(&40u32.to_le_bytes());
+        wide_buf.extend_from_slice(&0u32.to_le_bytes());
+        push_mulligan_header_full(
+            &mut wide_buf,
             1.0,
-            &[0.85, 0.8, 0.75, 0.6, 0.45, /* mv5 */ 5.0, 0.35, 0.3],
-            &[(0, 1.0), (1, 1.0)],
+            &[0.85, 0.8, 0.75, 0.6, 0.45, 0.4, 0.35, 0.3],
+            3.0,
+            10.0, // widened band — a 7-land hand now fits comfortably
+            &[],
         );
         for _ in 0..40u32 {
-            lenient_buf.push(0);
-            lenient_buf.push(5);
-            lenient_buf.push(0); lenient_buf.push(0); lenient_buf.push(0);
-            lenient_buf.extend_from_slice(&[0u8; 6]);
-            lenient_buf.push(0);
-            lenient_buf.extend_from_slice(&0u32.to_le_bytes());
+            wide_buf.push(0x41);
+            wide_buf.push(0);
+            wide_buf.push(0); wide_buf.push(0); wide_buf.push(0);
+            wide_buf.extend_from_slice(&[0u8; 6]);
+            wide_buf.push(0);
+            wide_buf.extend_from_slice(&0u32.to_le_bytes());
         }
-        let (cards2, mechanics2, lenient_mulligan) = decode(&lenient_buf).unwrap();
+        let (cards2, mechanics2, wide_mulligan) = decode(&wide_buf).unwrap();
         let pip_weights2 = crate::types::compute_deck_pip_weights(&cards2);
         let mut rng2 = Rng::new(7);
-        let rec_lenient =
-            run_game(&cards2, &mechanics2, &lenient_mulligan, &pip_weights2, &mut rng2, 5);
-        // Same deck, same seed — only the deck's configured mulligan values changed
-        // (mv5 value 0.3→5.0, threshold 3.5→1.0): 7*5.0=35 >= 1.0, hand is kept.
-        assert!(!rec_lenient.took_mulligan(), "lenient config should keep the same hand");
+        let rec_wide = run_game(&cards2, &mechanics2, &wide_mulligan, &pip_weights2, &mut rng2, 5);
+        // Same deck, same seed — only the deck's configured Mana Base band changed
+        // (max 4.0 -> 10.0): the same 7-land hand now fits inside the band, so it's kept.
+        assert!(
+            !rec_wide.took_mulligan(),
+            "the same all-land hand should be kept once the band is widened to fit it"
+        );
     }
 
     // ==================== New formula rules: multicolor lands, X-cost, MV4+ cap ====================
@@ -396,5 +421,59 @@ mod tests {
         assert_eq!(config.mv_values[5], 0.2);
         assert_eq!(config.mv_values[6], 0.2);
         assert_eq!(config.mv_values[7], 0.2);
+    }
+
+    // ==================== Mana Base (mana_base_value) ====================
+
+    #[test]
+    fn test_mana_base_value_basic_land() {
+        let weights = crate::types::DeckPipWeights::default();
+        let basic = make_sim_card(0x01 | 0x40, 0, 0, 0, 0, 0, 0, 0); // isLand + isBasicLand
+        assert_eq!(crate::types::mana_base_value(&basic, &weights), 1.0);
+    }
+
+    #[test]
+    fn test_mana_base_value_tapped_nonbasic_mono_land() {
+        let weights = crate::types::DeckPipWeights::default();
+        // isLand + entersTappedOrConditional, mono-U (color_mask 0x02)
+        let tapped = make_sim_card(0x01 | 0x80, 0, 0x02, 0, 0, 0, 0, 0);
+        let value = crate::types::mana_base_value(&tapped, &weights);
+        assert!((value - 0.8).abs() < 1e-6, "expected 0.8, got {}", value);
+    }
+
+    #[test]
+    fn test_mana_base_value_untapped_nonbasic_mono_land() {
+        let weights = crate::types::DeckPipWeights::default();
+        // isLand only, mono-U, no basic/tapped flags — a normal untapped nonbasic mono land
+        let untapped = make_sim_card(0x01, 0, 0x02, 0, 0, 0, 0, 0);
+        assert_eq!(crate::types::mana_base_value(&untapped, &weights), 1.0);
+    }
+
+    #[test]
+    fn test_mana_base_value_multicolor_land_uses_multiplier() {
+        let weights = crate::types::DeckPipWeights { w: 0.5, u: 0.5, b: 0.0, r: 0.0, g: 0.0 };
+        let dual = make_sim_card(0x01, 0, 0x01 | 0x02, 0, 0, 0, 0, 0); // isLand, produces W+U
+        let value = crate::types::mana_base_value(&dual, &weights);
+        assert!((value - 1.4).abs() < 1e-6, "expected 1.4, got {}", value);
+    }
+
+    #[test]
+    fn test_mana_base_value_cheap_mana_rock_by_cmc() {
+        let weights = crate::types::DeckPipWeights::default();
+        let rock_at = |cmc: u8| {
+            let card = make_sim_card(0x08, cmc, 0, 0, 0, 0, 0, 0); // isManaProducing, non-land
+            crate::types::mana_base_value(&card, &weights)
+        };
+        assert_eq!(rock_at(0), 1.0);
+        assert_eq!(rock_at(1), 0.9);
+        assert_eq!(rock_at(2), 0.6);
+        assert_eq!(rock_at(3), 0.0);
+    }
+
+    #[test]
+    fn test_mana_base_value_plain_non_mana_card_scores_zero() {
+        let weights = crate::types::DeckPipWeights::default();
+        let plain = make_sim_card(0x02, 2, 0, 0, 0, 0, 0, 0); // isCreature, no mana ability
+        assert_eq!(crate::types::mana_base_value(&plain, &weights), 0.0);
     }
 }
